@@ -32,7 +32,11 @@ def get_engine():
     global _engine
     if _engine is None:
         url = _database_url()
-        if url.startswith(("postgres://", "postgresql://")) and "sslmode=" not in url:
+        if url.startswith("postgres://"):
+            url = "postgresql+psycopg://" + url[len("postgres://"):]
+        elif url.startswith("postgresql://"):
+            url = "postgresql+psycopg://" + url[len("postgresql://"):]
+        if "sslmode=" not in url:
             url += "&sslmode=require" if "?" in url else "?sslmode=require"
         _engine = create_engine(
             url,
@@ -81,13 +85,6 @@ def init_db(*, max_attempts: int = 5, initial_delay: float = 1.0) -> None:
 
     This is convenient for the project deployment. For an existing production
     database with schema changes, apply the SQL in migrations/ explicitly.
-
-    On free-tier hosting (e.g. Render's free web services spin down after
-    inactivity, and Neon's free compute autosuspends independently of that),
-    the very first connection attempt after a cold start can land while the
-    database is still waking up. Retry with backoff here so that transient
-    window doesn't take down the whole app at boot — pool_pre_ping only
-    protects connections *after* this first one succeeds.
     """
     import time
 
