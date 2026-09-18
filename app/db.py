@@ -76,16 +76,42 @@ def db_session() -> Iterator[Session]:
         db.close()
 
 
-def init_db() -> None:
+def init_db(*, max_attempts: int = 5, initial_delay: float = 1.0) -> None:
     """Create missing tables.
 
     This is convenient for the project deployment. For an existing production
     database with schema changes, apply the SQL in migrations/ explicitly.
+
+    On free-tier hosting (e.g. Render's free web services spin down after
+    inactivity, and Neon's free compute autosuspends independently of that),
+    the very first connection attempt after a cold start can land while the
+    database is still waking up. Retry with backoff here so that transient
+    window doesn't take down the whole app at boot — pool_pre_ping only
+    protects connections *after* this first one succeeds.
     """
+    import time
+
     # Import models only after Base exists; this also avoids a circular import.
     from app import models  # noqa: F401
 
-    Base.metadata.create_all(get_engine())
+    delay = initial_delay
+    last_error: Exception | None = None
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            Base.metadata.create_all(get_engine())
+            return
+        except Exception as exc:  # noqa: BLE001 - deliberately broad: any connect failure should retry
+            last_error = exc
+            if attempt == max_attempts:
+                break
+            time.sleep(delay)
+            delay *= 2
+
+    raise RuntimeError(
+        f"Could not connect to the database after {max_attempts} attempts "
+        "(the database may still be waking up from autosuspend)."
+    ) from last_error
 
 
 def utcnow() -> datetime:
