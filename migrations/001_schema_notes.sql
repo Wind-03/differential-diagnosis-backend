@@ -1,0 +1,7 @@
+-- Fresh Neon databases: the FastAPI application creates the current schema
+-- automatically on startup via SQLAlchemy metadata.create_all().
+--
+-- If this database was initialized by an older version of the project, do NOT
+-- blindly run ALTER statements against it. The old schema used different ORM
+-- definitions for chat_messages and other tables. For an existing database,
+-- inspect its schema and migrate/export data deliberately before deployment.

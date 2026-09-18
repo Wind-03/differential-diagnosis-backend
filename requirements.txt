@@ -1,0 +1,31 @@
+# Runtime
+pandas>=2.0,<3
+numpy>=1.24,<3
+scikit-learn>=1.9,<2
+xgboost>=2.0,<4
+joblib>=1.3,<2
+shap>=0.45,<1
+
+# Database
+SQLAlchemy>=2.0,<3
+psycopg[binary]>=3.2,<4
+
+# API
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+pydantic>=2.0,<3
+python-dotenv>=1.0,<2
+
+# Conversational agent
+langchain-core>=0.3,<2
+langchain-classic>=1.0,<2
+langchain-openai>=0.3,<2
+
+# Training / diagnostics / notebook tooling
+imbalanced-learn>=0.10,<1
+ipykernel>=6,<8
+
+#security
+PyJWT>=2.9,<3
+pwdlib[argon2]>=0.2,<1
+email-validator>=2.2,<3
