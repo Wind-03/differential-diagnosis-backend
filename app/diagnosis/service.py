@@ -161,7 +161,6 @@
 #     for recommendation in result["recommendations"]:
 #         print(f"  {recommendation}")
 
-
 """Core differential-diagnosis service (Malaria-only)."""
 from __future__ import annotations
 
@@ -229,6 +228,13 @@ class DifferentialDiagnosis:
         if self.malaria_model is None:
             raise RuntimeError("The Malaria model artifact must be available.")
 
+        # Track which model features were actually supplied by the caller,
+        # as opposed to ones that will be silently filled with a training-set
+        # median in _prepare_input below. Without this, a defaulted value
+        # (e.g. a median Age) can show up in top_factors looking identical
+        # to a value the patient actually reported.
+        reported_features = {feature for feature in self.malaria_features if feature in patient_data}
+
         malaria_input = self._prepare_input(
             patient_data, self.malaria_features, self.malaria_medians, self.malaria_label_encoders
         )
@@ -239,6 +245,8 @@ class DifferentialDiagnosis:
         malaria_explanation = explain_prediction(
             self.malaria_explainer, self.malaria_scaler, self.malaria_features, malaria_input
         )
+        for factor in malaria_explanation["top_factors"]:
+            factor["source"] = "reported" if factor["feature"] in reported_features else "assumed_default"
 
         threshold = self.paths.diagnosis_threshold
         if malaria_prob > threshold:
