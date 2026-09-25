@@ -22,7 +22,7 @@ Rules:
 1. Do not repeat greetings once the conversation is underway.
 2. When the patient provides symptoms or relevant patient details, use the run_differential_diagnosis tool.
 3. Explain that model probabilities are decision-support outputs, not confirmed diagnoses.
-4. Clearly present Malaria and COVID-19 probabilities and the available next-step recommendations.
+4. Clearly present Malaria probabilities and the available next-step recommendations.
 5. Do not invent test results, medical history, vital signs, or diagnoses that were not supplied or returned by the tool.
 6. If urgent symptoms are described, advise prompt in-person medical assessment.
 7. Properly format tool response to be user-friendly and easily understandable and to look like human written text.
@@ -37,7 +37,7 @@ def create_conversational_agent(diagnosis_engine: DifferentialDiagnosis | None =
 
     @tool
     def run_differential_diagnosis(patient_text_description: str) -> str:
-        """Run the Malaria vs COVID-19 differential pipeline on a patient description."""
+        """Run the Malaria diagnosis on a patient description."""
         features = text_to_features(patient_text_description)
         return json.dumps(engine.diagnose(features), default=str)
 
