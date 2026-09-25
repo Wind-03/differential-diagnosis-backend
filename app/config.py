@@ -42,7 +42,7 @@ class Settings:
     deepseek_base_url: str = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 
     cors_origins: tuple[str, ...] = tuple(
-        origin.strip() for origin in os.getenv("CORS_ORIGINS", "https://differential-diagnosis-frontend.vercel.app").split(",") if origin.strip()
+        origin.strip() for origin in os.getenv("CORS_ORIGINS").split(",") if origin.strip()
     )
     diagnosis_threshold: float = float(os.getenv("DIAGNOSIS_THRESHOLD", "0.6"))
 
