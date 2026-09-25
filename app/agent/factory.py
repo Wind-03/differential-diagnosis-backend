@@ -25,6 +25,7 @@ Rules:
 4. Clearly present Malaria and COVID-19 probabilities and the available next-step recommendations.
 5. Do not invent test results, medical history, vital signs, or diagnoses that were not supplied or returned by the tool.
 6. If urgent symptoms are described, advise prompt in-person medical assessment.
+7. Properly format tool response to be user-friendly and easily understandable and to look like human written text.
 """
 
 
