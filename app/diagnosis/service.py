@@ -174,6 +174,16 @@ from app.config import settings
 from app.diagnosis.explainer import build_tree_explainer, explain_prediction
 from src.malaria_model import load_malaria_model
 
+# These match the sentinels src/malaria_model.py's missingness augmentation
+# used during training (NUMERIC_SENTINEL / BINARY_SENTINEL in
+# src/data_loader.py). The model was specifically trained to recognize these
+# values as "unreported", not as genuine low/typical measurements — so a
+# missing field must be filled with the sentinel, not a dataset median,
+# or the model reads a fabricated value instead of an absence of information.
+NUMERIC_MISSING_SENTINEL = -999
+BINARY_MISSING_SENTINEL = -1
+NUMERIC_FEATURES = {"Age"}  # every other malaria feature is binary/encoded
+
 
 class DifferentialDiagnosis:
     """Load model artifacts once and expose structured diagnosis operations.
@@ -213,7 +223,14 @@ class DifferentialDiagnosis:
         return values
 
     def _prepare_input(self, patient_data: dict[str, Any], features: list[str], medians: dict[str, Any], encoders=None):
-        prepared = {feature: patient_data.get(feature, medians.get(feature, 0)) for feature in features}
+        prepared = {}
+        for feature in features:
+            if feature in patient_data:
+                prepared[feature] = patient_data[feature]
+            elif feature in NUMERIC_FEATURES:
+                prepared[feature] = NUMERIC_MISSING_SENTINEL
+            else:
+                prepared[feature] = BINARY_MISSING_SENTINEL
         if encoders:
             prepared = self._encode_categoricals(prepared, encoders)
         return prepared
