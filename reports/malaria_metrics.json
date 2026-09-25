@@ -1,0 +1,93 @@
+{
+  "disease": "malaria",
+  "timestamp_utc": "2026-09-25T00:48:29.271732+00:00",
+  "dataset": {
+    "n_train": 1297,
+    "n_test": 325,
+    "n_features": 13,
+    "positive_rate": 0.7194821208384711,
+    "feature_list": [
+      "Fever",
+      "Headache",
+      "Abdominal_Pain",
+      "General_Body_Malaise",
+      "Dizziness",
+      "Vomiting",
+      "Confusion",
+      "Backache",
+      "Chest_Pain",
+      "Coughing",
+      "Joint_Pain",
+      "Age",
+      "Sex"
+    ]
+  },
+  "individual_models": {
+    "xgb": {
+      "accuracy": 0.9538461538461539,
+      "precision": 0.9397590361445783,
+      "recall": 1.0,
+      "f1": 0.968944099378882,
+      "auc_roc": 0.9922982999906077,
+      "auc_pr": 0.9968259593414144,
+      "confusion_matrix": {
+        "true_negatives": 76,
+        "false_positives": 15,
+        "false_negatives": 0,
+        "true_positives": 234
+      },
+      "n_samples": 325,
+      "positive_rate": 0.72
+    },
+    "rf": {
+      "accuracy": 0.9384615384615385,
+      "precision": 0.9533898305084746,
+      "recall": 0.9615384615384616,
+      "f1": 0.9574468085106383,
+      "auc_roc": 0.981450173757866,
+      "auc_pr": 0.9922491441853295,
+      "confusion_matrix": {
+        "true_negatives": 80,
+        "false_positives": 11,
+        "false_negatives": 9,
+        "true_positives": 225
+      },
+      "n_samples": 325,
+      "positive_rate": 0.72
+    },
+    "lr": {
+      "accuracy": 0.7907692307692308,
+      "precision": 0.7748344370860927,
+      "recall": 1.0,
+      "f1": 0.8731343283582089,
+      "auc_roc": 0.9452427913966375,
+      "auc_pr": 0.9789356616379914,
+      "confusion_matrix": {
+        "true_negatives": 23,
+        "false_positives": 68,
+        "false_negatives": 0,
+        "true_positives": 234
+      },
+      "n_samples": 325,
+      "positive_rate": 0.72
+    }
+  },
+  "ensemble": {
+    "accuracy": 0.9476923076923077,
+    "precision": 0.9322709163346613,
+    "recall": 1.0,
+    "f1": 0.9649484536082474,
+    "auc_roc": 0.9884474499859115,
+    "auc_pr": 0.9950996235860479,
+    "confusion_matrix": {
+      "true_negatives": 74,
+      "false_positives": 17,
+      "false_negatives": 0,
+      "true_positives": 234
+    },
+    "n_samples": 325,
+    "positive_rate": 0.72
+  },
+  "best_individual_model": "xgb",
+  "ensemble_beats_best_individual": false
+}

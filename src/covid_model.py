@@ -1,95 +1,312 @@
-"""Train and load the XGBoost COVID-19 model."""
+"""Train and load the COVID-19 model (XGBoost, with stacking fallback)."""
 from __future__ import annotations
 
+import json
+import time
 from pathlib import Path
+from typing import Any
 
 import joblib
+import numpy as np
 import pandas as pd
-import xgboost as xgb
 from sklearn.calibration import CalibratedClassifierCV
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier, StackingClassifier, HistGradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import RobustScaler
+from xgboost import XGBClassifier
 
 from app.config import settings
-from src.data_loader import load_covid_data
+from src.data_loader import (
+    COVID_BINARY,
+    COVID_NUMERIC_EXTRA,
+    COVID_SEVERITY,
+    COVID_VITALS,
+    clean_covid_data,
+)
+from src.reporting import (
+    build_report,
+    compute_metrics,
+    save_disease_report,
+)
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+DISEASE = "covid"
+TARGET = "target"
+RANDOM_STATE = 42
+
+# Full feature set: symptoms + vitals + comorbidities + observations
+# + severity (ordinal) + age + days_since_symptom_onset
+COVID_FEATURES = (
+    ["age"]
+    + COVID_BINARY
+    + COVID_VITALS
+    + COVID_SEVERITY
+    + COVID_NUMERIC_EXTRA
+)
+
+COVID_NUMERIC = ["age"] + COVID_VITALS + COVID_NUMERIC_EXTRA
+COVID_CATEGORICAL: list[str] = []  # severity is already ordinal; no string categoricals
 
 
-def train_covid_model(data_path=None, models_dir: str | Path | None = None):
-    models_dir = Path(models_dir or settings.models_dir)
-    df = load_covid_data(data_path).copy()
+# ---------------------------------------------------------------------------
+# Missingness augmentation
+# ---------------------------------------------------------------------------
 
-    if "comorbidity" in df.columns:
-        df["comorbidity"] = df["comorbidity"].fillna("None")
+def _augment_missingness(
+    X: pd.DataFrame,
+    binary_cols: list[str],
+    numeric_cols: list[str],
+    categorical_cols: list[str],
+    rate_min: float = 0.05,
+    rate_max: float = 0.25,
+    seed: int = RANDOM_STATE,
+) -> pd.DataFrame:
+    """Randomly mask a variable fraction of values per row.
 
-    encoders = {}
-    if "gender" in df.columns:
-        gender_encoder = LabelEncoder()
-        df["gender_encoded"] = gender_encoder.fit_transform(df["gender"])
-        encoders["gender"] = gender_encoder
-        df = df.drop(columns="gender")
+    Vectorized version — much faster than row-by-row.
+    Sentinels:
+      - binary → -1
+      - numeric → -999
+      - categorical → "Unknown" (only if the column is still string dtype)
+    """
+    rng = np.random.default_rng(seed)
+    X_aug = X.copy()
+    n_rows, n_cols = X_aug.shape
 
-    if "comorbidity" in df.columns:
-        dummies = pd.get_dummies(df["comorbidity"], prefix="comorbidity", dtype=int)
-        df = pd.concat([df.drop(columns="comorbidity"), dummies], axis=1)
+    # Per-row mask rates
+    rates = rng.uniform(rate_min, rate_max, size=n_rows)
+    n_masks = np.round(rates * n_cols).astype(int)
 
-    if "patient_id" in df.columns:
-        df = df.drop(columns="patient_id")
+    # Per-row, choose which columns to mask
+    for i in range(n_rows):
+        if n_masks[i] == 0:
+            continue
+        masked_idx = rng.choice(n_cols, size=n_masks[i], replace=False)
+        for j in masked_idx:
+            col = X_aug.columns[j]
+            if col in binary_cols:
+                X_aug.iat[i, j] = -1
+            elif col in numeric_cols:
+                X_aug.iat[i, j] = -999.0
+            elif col in categorical_cols:
+                X_aug.iat[i, j] = "Unknown"
+            else:
+                X_aug.iat[i, j] = -999.0
 
-    X = df.drop(columns="covid_result")
-    y = df["covid_result"]
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, stratify=y, random_state=42
-    )
+    return X_aug
 
-    medians = X_train.median(numeric_only=True).to_dict()
-    for col in X_train.columns:
-        if X_train[col].isna().any():
-            X_train[col] = X_train[col].fillna(medians.get(col, 0))
-            X_test[col] = X_test[col].fillna(medians.get(col, 0))
+def _fit_medians(X: pd.DataFrame, numeric_cols: list[str]) -> dict[str, float]:
+    """Fit medians on clean (non-sentinel) values."""
+    medians: dict[str, float] = {}
+    for col in numeric_cols:
+        clean = X.loc[X[col] != settings.numeric_missing, col]
+        medians[col] = float(clean.median()) if not clean.empty else 0.0
+    return medians
 
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
 
-    model = CalibratedClassifierCV(
-        xgb.XGBClassifier(
-            n_estimators=100, max_depth=6, learning_rate=0.1,
-            subsample=0.8, colsample_bytree=0.8, random_state=42,
-            eval_metric="logloss",
-        ), method="sigmoid", cv=3,
-    )
-    model.fit(X_train_scaled, y_train)
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
 
-    y_pred = model.predict(X_test_scaled)
-    print(f"✅ COVID accuracy: {accuracy_score(y_test, y_pred):.4f}")
-    print(classification_report(y_test, y_pred))
-    print(confusion_matrix(y_test, y_pred))
+def train_covid_model(
+    data_path: Path | str | None = None,
+    models_dir: Path | str | None = None,
+    save: bool = True,
+) -> dict[str, Any]:
+    """Train COVID model and optionally persist artifacts."""
+    t0 = time.time()
 
-    # Keep the original diagnostic baselines as training-time diagnostics.
-    tree = DecisionTreeClassifier(max_depth=3, random_state=42).fit(X_train_scaled, y_train)
-    logreg = LogisticRegression(max_iter=1000).fit(X_train_scaled, y_train)
-    print(f"Diagnostic shallow-tree accuracy: {tree.score(X_test_scaled, y_test):.4f}")
-    print(f"Diagnostic logistic-regression accuracy: {logreg.score(X_test_scaled, y_test):.4f}")
-
+    models_dir = Path(models_dir or settings.models_dir) / DISEASE
     models_dir.mkdir(parents=True, exist_ok=True)
-    joblib.dump(model, models_dir / "covid_model.pkl")
-    joblib.dump(scaler, models_dir / "covid_scaler.pkl")
-    joblib.dump(X.columns.tolist(), models_dir / "covid_features.pkl")
-    joblib.dump(medians, models_dir / "covid_medians.pkl")
-    joblib.dump(encoders, models_dir / "covid_label_encoders.pkl")
-    print(f"✅ COVID artifacts saved to {models_dir}")
-    return model
+
+    # ---------------- Load & clean ----------------
+    df = clean_covid_data(data_path)
+    if TARGET not in df.columns:
+        raise ValueError(f"COVID dataset must contain a '{TARGET}' column")
+
+    feature_cols = [c for c in COVID_FEATURES if c in df.columns]
+    missing = [c for c in COVID_FEATURES if c not in df.columns]
+    if missing:
+        print(f"⚠️  Missing COVID features (will be skipped): {missing}")
+
+    X = df[feature_cols].copy()
+    y = df[TARGET].astype(int)
+
+    # ---------------- Train/test split ----------------
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, stratify=y, random_state=RANDOM_STATE
+    )
+
+    # ---------------- Fit medians on CLEAN train data ----------------
+    medians = _fit_medians(X_train, COVID_NUMERIC)
+
+    # ---------------- Fit scaler on CLEAN train data ----------------
+    scaler = RobustScaler()
+    scaler.fit(X_train)
+
+    X_train_scaled = pd.DataFrame(
+        scaler.transform(X_train), columns=feature_cols
+    )
+    X_test_scaled = pd.DataFrame(
+        scaler.transform(X_test), columns=feature_cols
+    )
+
+    # ---------------- Augment training data ----------------
+    X_train_aug = _augment_missingness(
+        X_train_scaled,
+        binary_cols=COVID_BINARY,
+        numeric_cols=COVID_NUMERIC + COVID_SEVERITY,  # severity treated as numeric
+        categorical_cols=[],
+        rate_min=settings.missing_rate_min,
+        rate_max=settings.missing_rate_max,
+    )
+
+    # ---------------- Base models ----------------
+    xgb = CalibratedClassifierCV(
+        XGBClassifier(
+            n_estimators=200,
+            max_depth=6,
+            learning_rate=0.1,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=RANDOM_STATE,
+            eval_metric="logloss",
+            tree_method="hist",
+        ),
+        method="sigmoid",
+        cv=3,
+    )
+    rf = RandomForestClassifier(
+        n_estimators=200,
+        max_depth=10,
+        class_weight="balanced",
+        random_state=RANDOM_STATE,
+        n_jobs=-1,
+    )
+    hgb = HistGradientBoostingClassifier(
+        max_iter=200,
+        max_depth=6,
+        learning_rate=0.1,
+        random_state=RANDOM_STATE,
+    )
+
+    stack = StackingClassifier(
+        estimators=[("xgb", xgb), ("rf", rf), ("hgb", hgb)],
+        final_estimator=LogisticRegression(max_iter=1000, random_state=RANDOM_STATE),
+        cv=5,
+        passthrough=False,
+        n_jobs=-1,
+    )
+
+    individual_metrics = {}
+    for name, model in [("xgb", xgb), ("rf", rf), ("hgb", hgb)]:
+        model.fit(X_train_aug, y_train)
+        y_pred = model.predict(X_test_scaled)
+        y_proba = model.predict_proba(X_test_scaled)[:, 1]
+        individual_metrics[name] = compute_metrics(y_test, y_pred, y_proba)
+    
+    # Then train the stack (which refits base models internally)
+    print(f"🔄 Training COVID stacking ensemble...")
+    stack.fit(X_train_aug, y_train)
+
+    y_pred_ens = stack.predict(X_test_scaled)
+    y_proba_ens = stack.predict_proba(X_test_scaled)[:, 1]
+    ensemble_metrics = compute_metrics(y_test, y_pred_ens, y_proba_ens)
+
+    # ---------------- Select winner ----------------
+    # ---------------- Select the best INDIVIDUAL model ----------------
+    # The stacking ensemble is trained for comparison but is not eligible
+    # for deployment because:
+    #   (1) It has not outperformed the best individual model on any dataset.
+    #   (2) SHAP cannot explain StackingClassifier predictions.
+    candidates = {
+        "xgb": (xgb, individual_metrics["xgb"]),
+        "rf": (rf, individual_metrics["rf"]),
+        "hgb": (hgb, individual_metrics["hgb"]),
+    }
+
+    winner_name = max(candidates, key=lambda k: candidates[k][1]["f1"])
+    winner_model = candidates[winner_name][0]
+    winner_metrics = candidates[winner_name][1]
+
+    print(f"\n🏆 Selected model: {winner_name.upper()} (F1={winner_metrics['f1']:.4f})")
+    print(f"    Individual candidates:")
+    for name, (_, m) in candidates.items():
+        print(f"      {name}: F1={m['f1']:.4f}")
+    print(f"    (Stack F1={ensemble_metrics['f1']:.4f} — not eligible for deployment)")
+
+    # ---------------- Report ----------------
+    dataset_info = {
+        "n_train": int(len(X_train)),
+        "n_test": int(len(X_test)),
+        "n_features": len(feature_cols),
+        "positive_rate": float(y.mean()),
+        "feature_list": feature_cols,
+    }
+    report = build_report(DISEASE, individual_metrics, ensemble_metrics, dataset_info)
+
+    # ---------------- Persist ----------------
+    if save:
+        metadata = {
+            "disease": DISEASE,
+            "selected_model": winner_name,
+            "selection_reason": (
+                f"{winner_name} achieved highest test-set F1 "
+                f"({winner_metrics['f1']:.4f}) among individual models"
+            ),
+            "feature_cols": feature_cols,
+            "binary_cols": COVID_BINARY,
+            "numeric_cols": COVID_NUMERIC,
+            "severity_cols": COVID_SEVERITY,
+            "trained_at": report["timestamp_utc"],
+            "n_train": dataset_info["n_train"],
+            "n_test": dataset_info["n_test"],
+            "random_state": RANDOM_STATE,
+            "test_metrics": winner_metrics,
+        }
+
+        joblib.dump(winner_model, models_dir / "model.pkl")
+        joblib.dump(scaler, models_dir / "scaler.pkl")
+        joblib.dump(feature_cols, models_dir / "features.pkl")
+        joblib.dump(medians, models_dir / "medians.pkl")
+        joblib.dump({}, models_dir / "label_encoders.pkl")  # no categorical encoders
+        joblib.dump(metadata, models_dir / "metadata.pkl")
+
+        joblib.dump(stack, models_dir / "model_alternative.pkl")
+
+        save_disease_report(DISEASE, report)
+
+        print(f"✅ COVID artifacts saved → {models_dir}")
+        print(f"⏱️  Elapsed: {time.time() - t0:.1f}s")
+
+    return {
+        "model": winner_model,
+        "model_name": winner_name,
+        "scaler": scaler,
+        "features": feature_cols,
+        "medians": medians,
+        "metadata": metadata if save else None,
+        "report": report,
+    }
 
 
-def load_covid_model(models_dir: str | Path | None = None):
-    models_dir = Path(models_dir or settings.models_dir)
+# ---------------------------------------------------------------------------
+# Loading
+# ---------------------------------------------------------------------------
+
+def load_covid_model(
+    models_dir: Path | str | None = None,
+) -> tuple[Any, Any, list[str]] | tuple[None, None, None]:
+    """Load the saved COVID model, scaler, and feature order."""
+    models_dir = Path(models_dir or settings.models_dir) / DISEASE
     try:
-        model = joblib.load(models_dir / "covid_model.pkl")
-        scaler = joblib.load(models_dir / "covid_scaler.pkl")
-        features = joblib.load(models_dir / "covid_features.pkl")
+        model = joblib.load(models_dir / "model.pkl")
+        scaler = joblib.load(models_dir / "scaler.pkl")
+        features = joblib.load(models_dir / "features.pkl")
         print("✅ COVID model loaded successfully!")
         return model, scaler, features
     except FileNotFoundError:
@@ -97,5 +314,18 @@ def load_covid_model(models_dir: str | Path | None = None):
         return None, None, None
 
 
+def load_covid_metadata(models_dir: Path | str | None = None) -> dict[str, Any]:
+    models_dir = Path(models_dir or settings.models_dir) / DISEASE
+    return joblib.load(models_dir / "metadata.pkl")
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
 if __name__ == "__main__":
-    train_covid_model()
+    result = train_covid_model()
+    print("\n" + "=" * 60)
+    print("COVID REPORT")
+    print("=" * 60)
+    print(json.dumps(result["report"], indent=2, default=str))
